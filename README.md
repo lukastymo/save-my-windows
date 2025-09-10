@@ -5,6 +5,13 @@ It lets you restore your window layout whenever Wayland resets or scrambles posi
 
 ## Installation
 
-# License
+### Option 1
+
+1. Run the following command in your terminal:
+   ```bash
+   ./install.sh
+   ```
+
+## License
 
 This extension is released under the GNU Public License version 3.
