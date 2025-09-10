@@ -79,7 +79,9 @@ export default class SaveMyWindowsExtension {
       const [ok, contents] = GLib.file_get_contents(LAYOUT_FILE);
       if (!ok) throw new Error('Could not read layout file');
 
-      const saved = JSON.parse(imports.byteArray.toString(contents));
+      // Decode bytes → string (modern GJS; ByteArray is deprecated)
+      const decoder = new TextDecoder(); // defaults to 'utf-8'
+      const saved = JSON.parse(decoder.decode(contents));
 
       for (const actor of global.get_window_actors()) {
         const w = actor.meta_window;
