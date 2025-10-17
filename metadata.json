@@ -2,6 +2,7 @@
   "uuid": "save-my-windows@lukastymo.com",
   "name": "Save My Windows",
   "description": "Save My Windows periodically records all open windows along with their monitors and workspaces. It lets you restore your window layout whenever Wayland resets or scrambles positions (e.g. after suspend).",
+  "version": 2,
   "shell-version": [
     "45",
     "46",
