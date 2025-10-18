@@ -255,8 +255,12 @@ export default class SaveMyWindowsExtension {
   }
 
   _startSuspendMonitor() {
-    if (!this.autoRestoreAfterSuspend) return;
+    if (!this.autoRestoreAfterSuspend) {
+      log(`[${EXTENSION_NAME}] Auto-restore after suspend is disabled, skipping suspend monitor`);
+      return;
+    }
 
+    log(`[${EXTENSION_NAME}] Starting suspend monitor...`);
     try {
       // Monitor systemd-logind for suspend/resume events
       this.suspendMonitor = new Gio.DBusProxy({
@@ -268,8 +272,10 @@ export default class SaveMyWindowsExtension {
       });
       
       this.suspendMonitor.connect('g-signal', (proxy, sender, signal, parameters) => {
+        log(`[${EXTENSION_NAME}] Received D-Bus signal: ${signal}`);
         if (signal === 'PrepareForSleep') {
           const [sleeping] = parameters.deep_unpack();
+          log(`[${EXTENSION_NAME}] PrepareForSleep signal: sleeping=${sleeping}`);
           if (!sleeping) {
             // System is resuming from suspend
             log(`[${EXTENSION_NAME}] System resumed from suspend, restoring layout...`);
@@ -298,6 +304,7 @@ export default class SaveMyWindowsExtension {
       });
       
       this.suspendMonitor.init(null);
+      log(`[${EXTENSION_NAME}] Suspend monitor started successfully`);
     } catch (e) {
       log(`[${EXTENSION_NAME}] Failed to start suspend monitor: ${String(e)}`);
     }
@@ -316,30 +323,14 @@ export default class SaveMyWindowsExtension {
 
   _isDisplaySystemReady() {
     try {
-      // Check if workspace manager is ready
+      // Simplified check - just verify basic components exist
       if (!global.workspace_manager) {
         log(`[${EXTENSION_NAME}] Workspace manager not ready`);
         return false;
       }
       
-      // Check if we have valid monitors
-      const monitorManager = global.display.get_monitor_manager();
-      if (!monitorManager) {
-        log(`[${EXTENSION_NAME}] Monitor manager not ready`);
-        return false;
-      }
-      
-      // Check if we have at least one monitor
-      const monitors = global.display.get_monitors();
-      if (!monitors || monitors.length === 0) {
-        log(`[${EXTENSION_NAME}] No monitors detected`);
-        return false;
-      }
-      
-      // Check if primary monitor is valid
-      const primaryMonitor = global.display.get_primary_monitor();
-      if (!primaryMonitor) {
-        log(`[${EXTENSION_NAME}] Primary monitor not ready`);
+      if (!global.display) {
+        log(`[${EXTENSION_NAME}] Display not ready`);
         return false;
       }
       
