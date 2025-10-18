@@ -102,6 +102,12 @@ export default class SaveMyWindowsExtension {
     try {
       ensureConfigDir();
 
+      // Safety check: ensure display system is ready before attempting restore
+      if (!this._isDisplaySystemReady()) {
+        log(`[${EXTENSION_NAME}] Display system not ready, aborting restore`);
+        return `Display system not ready`;
+      }
+
       const [ok, contents] = GLib.file_get_contents(LAYOUT_FILE);
       if (!ok) {
         log(`[${EXTENSION_NAME}] Layout file not found: ${LAYOUT_FILE}`);
@@ -128,29 +134,42 @@ export default class SaveMyWindowsExtension {
         
         // Add small delay between operations for Wayland
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-          if (match.workspace >= 0) {
+          if (match.workspace >= 0 && this._isDisplaySystemReady()) {
             const ws = global.workspace_manager.get_workspace_by_index(match.workspace);
             if (ws) {
               log(`[${EXTENSION_NAME}] Moving to workspace ${match.workspace}`);
-              w.change_workspace(ws);
+              try {
+                w.change_workspace(ws);
+              } catch (e) {
+                log(`[${EXTENSION_NAME}] Error moving to workspace: ${String(e)}`);
+              }
             }
           }
           return GLib.SOURCE_REMOVE;
         });
         
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-          if (match.monitor >= 0) {
+          if (match.monitor >= 0 && this._isDisplaySystemReady()) {
             log(`[${EXTENSION_NAME}] Moving to monitor ${match.monitor}`);
-            w.move_to_monitor(match.monitor);
+            try {
+              w.move_to_monitor(match.monitor);
+            } catch (e) {
+              log(`[${EXTENSION_NAME}] Error moving to monitor: ${String(e)}`);
+            }
           }
           return GLib.SOURCE_REMOVE;
         });
         
         GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
           if (match.x !== undefined && match.y !== undefined &&
-            match.width !== undefined && match.height !== undefined) {
+            match.width !== undefined && match.height !== undefined &&
+            this._isDisplaySystemReady()) {
             log(`[${EXTENSION_NAME}] Resizing to ${match.x},${match.y} ${match.width}x${match.height}`);
-            w.move_resize_frame(true, match.x, match.y, match.width, match.height);
+            try {
+              w.move_resize_frame(true, match.x, match.y, match.width, match.height);
+            } catch (e) {
+              log(`[${EXTENSION_NAME}] Error resizing window: ${String(e)}`);
+            }
           }
           return GLib.SOURCE_REMOVE;
         });
@@ -254,11 +273,24 @@ export default class SaveMyWindowsExtension {
           if (!sleeping) {
             // System is resuming from suspend
             log(`[${EXTENSION_NAME}] System resumed from suspend, restoring layout...`);
-            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => {
               log(`[${EXTENSION_NAME}] About to restore layout after suspend...`);
+              
+              // Safety check: ensure display system is ready
+              if (!this._isDisplaySystemReady()) {
+                log(`[${EXTENSION_NAME}] Display system not ready, delaying restore...`);
+                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                  const result = this.RestoreLayout();
+                  log(`[${EXTENSION_NAME}] Delayed restore result: ${result}`);
+                  Main.notify('Save My Windows', 'Layout restored after suspend.');
+                  return GLib.SOURCE_REMOVE;
+                });
+                return GLib.SOURCE_REMOVE;
+              }
+              
               const result = this.RestoreLayout();
               log(`[${EXTENSION_NAME}] Restore result: ${result}`);
-              Main.notify('Save My Windows', `Auto-restore: ${result}`);
+              Main.notify('Save My Windows', 'Layout restored after suspend.');
               return GLib.SOURCE_REMOVE;
             });
           }
@@ -279,6 +311,43 @@ export default class SaveMyWindowsExtension {
         log(`[${EXTENSION_NAME}] Error disconnecting suspend monitor: ${String(e)}`);
       }
       this.suspendMonitor = null;
+    }
+  }
+
+  _isDisplaySystemReady() {
+    try {
+      // Check if workspace manager is ready
+      if (!global.workspace_manager) {
+        log(`[${EXTENSION_NAME}] Workspace manager not ready`);
+        return false;
+      }
+      
+      // Check if we have valid monitors
+      const monitorManager = global.display.get_monitor_manager();
+      if (!monitorManager) {
+        log(`[${EXTENSION_NAME}] Monitor manager not ready`);
+        return false;
+      }
+      
+      // Check if we have at least one monitor
+      const monitors = global.display.get_monitors();
+      if (!monitors || monitors.length === 0) {
+        log(`[${EXTENSION_NAME}] No monitors detected`);
+        return false;
+      }
+      
+      // Check if primary monitor is valid
+      const primaryMonitor = global.display.get_primary_monitor();
+      if (!primaryMonitor) {
+        log(`[${EXTENSION_NAME}] Primary monitor not ready`);
+        return false;
+      }
+      
+      log(`[${EXTENSION_NAME}] Display system is ready`);
+      return true;
+    } catch (e) {
+      log(`[${EXTENSION_NAME}] Error checking display system: ${String(e)}`);
+      return false;
     }
   }
 
