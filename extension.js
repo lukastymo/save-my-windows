@@ -1,3 +1,5 @@
+// noinspection JSUnresolvedVariable,JSUnresolvedFunction
+/* eslint-disable no-undef */
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
 import St from 'gi://St';
@@ -19,17 +21,25 @@ function ensureConfigDir() {
   }
 }
 
-function loadSettings() {
-  try {
-    ensureConfigDir();
-    const [ok, contents] = GLib.file_get_contents(SETTINGS_FILE);
-    if (!ok) return {};
-    
-    const decoder = new TextDecoder();
-    return JSON.parse(decoder.decode(contents));
-  } catch (e) {
-    return {};
-  }
+function loadSettings(callback) {
+  ensureConfigDir();
+  const file = Gio.File.new_for_path(SETTINGS_FILE);
+
+  file.load_contents_async(null, (file, result) => {
+    try {
+      const [ok, contents] = file.load_contents_finish(result);
+      if (!ok) {
+        callback({});
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      const settings = JSON.parse(decoder.decode(contents));
+      callback(settings);
+    } catch (e) {
+      callback({});
+    }
+  });
 }
 
 function saveSettings(settings) {
@@ -38,7 +48,7 @@ function saveSettings(settings) {
     const data = JSON.stringify(settings, null, 2);
     GLib.file_set_contents(SETTINGS_FILE, data);
   } catch (e) {
-    log(`[${EXTENSION_NAME}] Failed to save settings: ${String(e)}`);
+    console.error(`[${EXTENSION_NAME}] Failed to save settings: ${String(e)}`);
   }
 }
 
@@ -50,6 +60,8 @@ export default class SaveMyWindowsExtension {
     this.button = null;
     this.autoRestoreAfterSuspend = false;
     this.suspendMonitor = null;
+    this.restoreTimeouts = [];
+    this.suspendTimeouts = [];
 
     this.xml = `
       <node>
@@ -98,89 +110,124 @@ export default class SaveMyWindowsExtension {
     return `Layout saved`;
   }
 
+  _addRestoreTimeout(delayMs, callback) {
+    const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delayMs, () => {
+      callback();
+      this.restoreTimeouts = this.restoreTimeouts.filter(id => id !== timeoutId);
+      return GLib.SOURCE_REMOVE;
+    });
+    this.restoreTimeouts.push(timeoutId);
+  }
+
+  _addSuspendTimeout(delaySeconds, callback) {
+    const timeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, delaySeconds, () => {
+      callback();
+      this.suspendTimeouts = this.suspendTimeouts.filter(id => id !== timeoutId);
+      return GLib.SOURCE_REMOVE;
+    });
+    this.suspendTimeouts.push(timeoutId);
+  }
+
+  _clearRestoreTimeouts() {
+    this.restoreTimeouts.forEach(id => GLib.source_remove(id));
+    this.restoreTimeouts = [];
+  }
+
+  _clearSuspendTimeouts() {
+    this.suspendTimeouts.forEach(id => GLib.source_remove(id));
+    this.suspendTimeouts = [];
+  }
+
   RestoreLayout() {
     try {
       ensureConfigDir();
 
-      // Safety check: ensure display system is ready before attempting restore
       if (!this._isDisplaySystemReady()) {
-        log(`[${EXTENSION_NAME}] Display system not ready, aborting restore`);
+        console.warn(`[${EXTENSION_NAME}] Display system not ready, aborting restore`);
         return `Display system not ready`;
       }
 
-      const [ok, contents] = GLib.file_get_contents(LAYOUT_FILE);
-      if (!ok) {
-        log(`[${EXTENSION_NAME}] Layout file not found: ${LAYOUT_FILE}`);
-        return `No saved layout found`;
-      }
+      this._clearRestoreTimeouts();
 
-      // Decode bytes → string (modern GJS; ByteArray is deprecated)
-      const decoder = new TextDecoder(); // defaults to 'utf-8'
-      const saved = JSON.parse(decoder.decode(contents));
-      log(`[${EXTENSION_NAME}] Loaded ${saved.length} saved windows`);
+      const file = Gio.File.new_for_path(LAYOUT_FILE);
+      file.load_contents_async(null, (file, result) => {
+        try {
+          const [ok, contents] = file.load_contents_finish(result);
+          if (!ok) {
+            console.warn(`[${EXTENSION_NAME}] Layout file not found: ${LAYOUT_FILE}`);
+            Main.notify('Save My Windows', 'No saved layout found');
+            return;
+          }
 
-      let restoredCount = 0;
-      for (const actor of global.get_window_actors()) {
-        const w = actor.meta_window;
-        if (!w || w.get_window_type() !== Meta.WindowType.NORMAL) continue;
+          const decoder = new TextDecoder();
+          const saved = JSON.parse(decoder.decode(contents));
+          console.log(`[${EXTENSION_NAME}] Loaded ${saved.length} saved windows`);
 
-        const match = saved.find(s =>
-          s.wm_class === (w.get_wm_class() || '') &&
-          s.title === w.get_title()
-        );
-        if (!match) continue;
+          let restoredCount = 0;
+          for (const actor of global.get_window_actors()) {
+            const w = actor.meta_window;
+            if (!w || w.get_window_type() !== Meta.WindowType.NORMAL) continue;
 
-        log(`[${EXTENSION_NAME}] Restoring window: ${w.get_title()}`);
-        
-        // Add small delay between operations for Wayland
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-          if (match.workspace >= 0 && this._isDisplaySystemReady()) {
-            const ws = global.workspace_manager.get_workspace_by_index(match.workspace);
-            if (ws) {
-              log(`[${EXTENSION_NAME}] Moving to workspace ${match.workspace}`);
-              try {
-                w.change_workspace(ws);
-              } catch (e) {
-                log(`[${EXTENSION_NAME}] Error moving to workspace: ${String(e)}`);
+            const match = saved.find(s =>
+              s.wm_class === (w.get_wm_class() || '') &&
+              s.title === w.get_title()
+            );
+            if (!match) continue;
+
+            console.log(`[${EXTENSION_NAME}] Restoring window: ${w.get_title()}`);
+
+            this._addRestoreTimeout(100, () => {
+              if (match.workspace >= 0 && this._isDisplaySystemReady()) {
+                const ws = global.workspace_manager.get_workspace_by_index(match.workspace);
+                if (ws) {
+                  console.log(`[${EXTENSION_NAME}] Moving to workspace ${match.workspace}`);
+                  try {
+                    w.change_workspace(ws);
+                  } catch (e) {
+                    console.error(`[${EXTENSION_NAME}] Error moving to workspace: ${String(e)}`);
+                  }
+                }
               }
-            }
+            });
+
+            this._addRestoreTimeout(200, () => {
+              if (match.monitor >= 0 && this._isDisplaySystemReady()) {
+                console.log(`[${EXTENSION_NAME}] Moving to monitor ${match.monitor}`);
+                try {
+                  w.move_to_monitor(match.monitor);
+                } catch (e) {
+                  console.error(`[${EXTENSION_NAME}] Error moving to monitor: ${String(e)}`);
+                }
+              }
+            });
+
+            this._addRestoreTimeout(300, () => {
+              if (match.x !== undefined && match.y !== undefined &&
+                match.width !== undefined && match.height !== undefined &&
+                this._isDisplaySystemReady()) {
+                console.log(`[${EXTENSION_NAME}] Resizing to ${match.x},${match.y} ${match.width}x${match.height}`);
+                try {
+                  w.move_resize_frame(true, match.x, match.y, match.width, match.height);
+                } catch (e) {
+                  console.error(`[${EXTENSION_NAME}] Error resizing window: ${String(e)}`);
+                }
+              }
+            });
+
+            restoredCount++;
           }
-          return GLib.SOURCE_REMOVE;
-        });
-        
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-          if (match.monitor >= 0 && this._isDisplaySystemReady()) {
-            log(`[${EXTENSION_NAME}] Moving to monitor ${match.monitor}`);
-            try {
-              w.move_to_monitor(match.monitor);
-            } catch (e) {
-              log(`[${EXTENSION_NAME}] Error moving to monitor: ${String(e)}`);
-            }
-          }
-          return GLib.SOURCE_REMOVE;
-        });
-        
-        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 300, () => {
-          if (match.x !== undefined && match.y !== undefined &&
-            match.width !== undefined && match.height !== undefined &&
-            this._isDisplaySystemReady()) {
-            log(`[${EXTENSION_NAME}] Resizing to ${match.x},${match.y} ${match.width}x${match.height}`);
-            try {
-              w.move_resize_frame(true, match.x, match.y, match.width, match.height);
-            } catch (e) {
-              log(`[${EXTENSION_NAME}] Error resizing window: ${String(e)}`);
-            }
-          }
-          return GLib.SOURCE_REMOVE;
-        });
-        
-        restoredCount++;
-      }
-      
-      log(`[${EXTENSION_NAME}] Restored ${restoredCount} windows`);
-      return `Restored ${restoredCount} windows`;
+
+          console.log(`[${EXTENSION_NAME}] Restored ${restoredCount} windows`);
+          Main.notify('Save My Windows', `Restored ${restoredCount} windows`);
+        } catch (e) {
+          console.error(`[${EXTENSION_NAME}] Restore failed: ${String(e)}`);
+          Main.notify('Save My Windows', `Restore failed: ${String(e)}`);
+        }
+      });
+
+      return `Restore started`;
     } catch (e) {
-      log(`[${EXTENSION_NAME}] Restore failed: ${String(e)}`);
+      console.error(`[${EXTENSION_NAME}] Restore failed: ${String(e)}`);
       return `Restore failed: ${String(e)}`;
     }
   }
@@ -203,27 +250,25 @@ export default class SaveMyWindowsExtension {
 
     const restoreItem = new PopupMenu.PopupMenuItem('Restore Layout');
     restoreItem.connect('activate', () => {
-      log(`[${EXTENSION_NAME}] User clicked manual restore layout`);
+      console.log(`[${EXTENSION_NAME}] User clicked manual restore layout`);
       const result = this.RestoreLayout();
-      log(`[${EXTENSION_NAME}] Manual restore result: ${result}`);
+      console.log(`[${EXTENSION_NAME}] Manual restore result: ${result}`);
       Main.notify('Save My Windows', 'Layout restored.');
     });
     this.button.menu.addMenuItem(restoreItem);
 
-    // Add separator
     this.button.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-    // Add auto-restore checkbox
     const autoRestoreItem = new PopupMenu.PopupSwitchMenuItem('Restore automatically after suspend', this.autoRestoreAfterSuspend);
     autoRestoreItem.connect('toggled', (item, state) => {
       this.autoRestoreAfterSuspend = state;
       this._saveAutoRestoreSetting();
       if (state) {
-        log(`[${EXTENSION_NAME}] User enabled auto-restore after suspend`);
+        console.log(`[${EXTENSION_NAME}] User enabled auto-restore after suspend`);
         this._startSuspendMonitor();
         Main.notify('Save My Windows', 'Auto-restore after suspend enabled.');
       } else {
-        log(`[${EXTENSION_NAME}] User disabled auto-restore after suspend`);
+        console.log(`[${EXTENSION_NAME}] User disabled auto-restore after suspend`);
         this._stopSuspendMonitor();
         Main.notify('Save My Windows', 'Auto-restore after suspend disabled.');
       }
@@ -241,7 +286,7 @@ export default class SaveMyWindowsExtension {
       this.autoSaveIntervalMins * 60,
       () => {
         this.SaveLayout();
-        log(`[${EXTENSION_NAME}] Auto-saved layout to ${LAYOUT_FILE}`);
+        console.log(`[${EXTENSION_NAME}] Auto-saved layout to ${LAYOUT_FILE}`);
         return GLib.SOURCE_CONTINUE;
       }
     );
@@ -256,13 +301,14 @@ export default class SaveMyWindowsExtension {
 
   _startSuspendMonitor() {
     if (!this.autoRestoreAfterSuspend) {
-      log(`[${EXTENSION_NAME}] Auto-restore after suspend is disabled, skipping suspend monitor`);
+      console.log(`[${EXTENSION_NAME}] Auto-restore after suspend is disabled, skipping suspend monitor`);
       return;
     }
 
-    log(`[${EXTENSION_NAME}] Starting suspend monitor...`);
+    this._clearSuspendTimeouts();
+
+    console.log(`[${EXTENSION_NAME}] Starting suspend monitor...`);
     try {
-      // Monitor systemd-logind for suspend/resume events
       this.suspendMonitor = new Gio.DBusProxy({
         g_connection: Gio.DBus.system,
         g_name: 'org.freedesktop.login1',
@@ -270,52 +316,50 @@ export default class SaveMyWindowsExtension {
         g_interface_name: 'org.freedesktop.login1.Manager',
         g_flags: Gio.DBusProxyFlags.NONE
       });
-      
+
       this.suspendMonitor.connect('g-signal', (proxy, sender, signal, parameters) => {
-        log(`[${EXTENSION_NAME}] Received D-Bus signal: ${signal}`);
+        console.log(`[${EXTENSION_NAME}] Received D-Bus signal: ${signal}`);
         if (signal === 'PrepareForSleep') {
           const [sleeping] = parameters.deep_unpack();
-          log(`[${EXTENSION_NAME}] PrepareForSleep signal: sleeping=${sleeping}`);
+          console.log(`[${EXTENSION_NAME}] PrepareForSleep signal: sleeping=${sleeping}`);
           if (!sleeping) {
-            // System is resuming from suspend
-            log(`[${EXTENSION_NAME}] System resumed from suspend, restoring layout...`);
-            GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 10, () => {
-              log(`[${EXTENSION_NAME}] About to restore layout after suspend...`);
-              
-              // Safety check: ensure display system is ready
+            console.log(`[${EXTENSION_NAME}] System resumed from suspend, restoring layout...`);
+            this._addSuspendTimeout(10, () => {
+              console.log(`[${EXTENSION_NAME}] About to restore layout after suspend...`);
+
               if (!this._isDisplaySystemReady()) {
-                log(`[${EXTENSION_NAME}] Display system not ready, delaying restore...`);
-                GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 5, () => {
+                console.warn(`[${EXTENSION_NAME}] Display system not ready, delaying restore...`);
+                this._addSuspendTimeout(5, () => {
                   const result = this.RestoreLayout();
-                  log(`[${EXTENSION_NAME}] Delayed restore result: ${result}`);
+                  console.log(`[${EXTENSION_NAME}] Delayed restore result: ${result}`);
                   Main.notify('Save My Windows', 'Layout restored after suspend.');
-                  return GLib.SOURCE_REMOVE;
                 });
-                return GLib.SOURCE_REMOVE;
+                return;
               }
-              
+
               const result = this.RestoreLayout();
-              log(`[${EXTENSION_NAME}] Restore result: ${result}`);
+              console.log(`[${EXTENSION_NAME}] Restore result: ${result}`);
               Main.notify('Save My Windows', 'Layout restored after suspend.');
-              return GLib.SOURCE_REMOVE;
             });
           }
         }
       });
-      
+
       this.suspendMonitor.init(null);
-      log(`[${EXTENSION_NAME}] Suspend monitor started successfully`);
+      console.log(`[${EXTENSION_NAME}] Suspend monitor started successfully`);
     } catch (e) {
-      log(`[${EXTENSION_NAME}] Failed to start suspend monitor: ${String(e)}`);
+      console.error(`[${EXTENSION_NAME}] Failed to start suspend monitor: ${String(e)}`);
     }
   }
 
   _stopSuspendMonitor() {
+    this._clearSuspendTimeouts();
+
     if (this.suspendMonitor) {
       try {
         this.suspendMonitor.disconnect('g-signal');
       } catch (e) {
-        log(`[${EXTENSION_NAME}] Error disconnecting suspend monitor: ${String(e)}`);
+        console.error(`[${EXTENSION_NAME}] Error disconnecting suspend monitor: ${String(e)}`);
       }
       this.suspendMonitor = null;
     }
@@ -323,34 +367,35 @@ export default class SaveMyWindowsExtension {
 
   _isDisplaySystemReady() {
     try {
-      // Simplified check - just verify basic components exist
       if (!global.workspace_manager) {
-        log(`[${EXTENSION_NAME}] Workspace manager not ready`);
+        console.log(`[${EXTENSION_NAME}] Workspace manager not ready`);
         return false;
       }
-      
+
       if (!global.display) {
-        log(`[${EXTENSION_NAME}] Display not ready`);
+        console.log(`[${EXTENSION_NAME}] Display not ready`);
         return false;
       }
-      
-      log(`[${EXTENSION_NAME}] Display system is ready`);
+
+      console.log(`[${EXTENSION_NAME}] Display system is ready`);
       return true;
     } catch (e) {
-      log(`[${EXTENSION_NAME}] Error checking display system: ${String(e)}`);
+      console.error(`[${EXTENSION_NAME}] Error checking display system: ${String(e)}`);
       return false;
     }
   }
 
   _saveAutoRestoreSetting() {
-    const settings = loadSettings();
-    settings.autoRestoreAfterSuspend = this.autoRestoreAfterSuspend;
-    saveSettings(settings);
+    loadSettings((settings) => {
+      settings.autoRestoreAfterSuspend = this.autoRestoreAfterSuspend;
+      saveSettings(settings);
+    });
   }
 
   _loadAutoRestoreSetting() {
-    const settings = loadSettings();
-    this.autoRestoreAfterSuspend = settings.autoRestoreAfterSuspend || false;
+    loadSettings((settings) => {
+      this.autoRestoreAfterSuspend = settings.autoRestoreAfterSuspend || false;
+    });
   }
 
   enable() {
@@ -376,6 +421,7 @@ export default class SaveMyWindowsExtension {
       this.button = null;
     }
     this._stopAutoSave();
+    this._clearRestoreTimeouts();
     this._stopSuspendMonitor();
   }
 }
