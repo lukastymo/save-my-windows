@@ -1,3 +1,10 @@
+## Project status: Archived
+
+GNOME on Wayland now restores window layouts correctly after suspend/resume.  
+This extension is no longer required and will not be actively maintained.
+
+The code remains available for users who still need it.
+
 # Save My Windows
 
 This is a GNOME extension that works well on Wayland and helps with multi-monitor, multi-workspace setups, since window
